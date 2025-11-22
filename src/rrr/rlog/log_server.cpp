@@ -25,6 +25,16 @@ static void signal_handler(int sig) {
 }
 
 int main(int argc, char* argv[]) {
+        // Transport selection via environment variable (for demo)
+        #include "mq/transport_selector.h"
+        const char* env = getenv("RRR_TRANSPORT");
+        if (env && std::string(env) == "rdma") {
+            set_transport_type(TRANSPORT_RDMA);
+            printf("[INFO] Using RDMA transport for rrr.\n");
+        } else {
+            set_transport_type(TRANSPORT_TCP);
+            printf("[INFO] Using TCP transport for rrr.\n");
+        }
     string bind_addr = "0.0.0.0:8848";
     printf("usage: %s [bind_addr=%s]\n", argv[0], bind_addr.c_str());
     if (argc >= 2) {

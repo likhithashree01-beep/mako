@@ -16,6 +16,18 @@ void server_create(server_t **svr, poll_mgr_t *mgr) {
     s->is_start = false;
     mpr_hash_create(&s->ht_conn);
 
+    // Select transport at runtime
+    #include "transport_selector.h"
+    extern transport_t* create_tcp_transport();
+    extern transport_t* create_rdma_transport();
+    transport_type_t ttype = get_transport_type();
+    if (ttype == TRANSPORT_RDMA) {
+        s->transport = create_rdma_transport();
+    } else {
+        s->transport = create_tcp_transport();
+    }
+    s->comm->transport = s->transport;
+
     apr_thread_pool_create(&s->tp, 10, 10, s->comm->mp);
 }
 
@@ -28,32 +40,9 @@ void server_destroy(server_t *svr) {
 }
 
 void server_bind_listen(server_t *svr) {
-    apr_sockaddr_info_get(&svr->comm->sa, NULL, APR_INET, 
-			  svr->comm->port, 0, svr->comm->mp);
-/*
-    apr_socket_create(&r->s, r->sa->family, SOCK_DGRAM, APR_PROTO_UDP, r->pl_recv);
-*/
-    apr_socket_create(&svr->comm->s, svr->comm->sa->family, 
-		      SOCK_STREAM, APR_PROTO_TCP, svr->comm->mp);
-    apr_socket_opt_set(svr->comm->s, APR_SO_NONBLOCK, 1);
-    apr_socket_timeout_set(svr->comm->s, -1);
-    /* this is useful for a server(socket listening) process */
-    apr_socket_opt_set(svr->comm->s, APR_SO_REUSEADDR, 1);
-    apr_socket_opt_set(svr->comm->s, APR_TCP_NODELAY, 1);
-    
-    apr_status_t status = APR_SUCCESS;
-    status = apr_socket_bind(svr->comm->s, svr->comm->sa);
-    if (status != APR_SUCCESS) {
-        LOG_ERROR("cannot bind.");
-        printf("%s", apr_strerror(status, (char*)malloc(100), 100));
-        SAFE_ASSERT(status == APR_SUCCESS);
-    }
-    status = apr_socket_listen(svr->comm->s, 30000); // This is important!
-    if (status != APR_SUCCESS) {
-        LOG_ERROR("cannot listen.");
-        printf("%s", apr_strerror(status, (char*)malloc(100), 100));
-        SAFE_ASSERT(status == APR_SUCCESS);
-    }
+    // Use transport abstraction for bind/listen
+    int rc = svr->transport->connect(svr->transport, svr->comm); // connect = bind/listen for server
+    SAFE_ASSERT(rc == 0);
     LOG_INFO("successfuly bind and listen on port %d.", svr->comm->port);
 }
 
@@ -85,6 +74,7 @@ void sconn_create(sconn_t **sconn, server_t *svr) {
 
     rpc_common_create(&sc->comm);
     sc->comm->ht = svr->comm->ht; // TODO should be copy.
+    sc->transport = svr->transport; // inherit transport from server
 
     poll_job_create(&sc->pjob);
 
@@ -176,11 +166,11 @@ void handle_sconn_read(void* arg) {
 
     sconn_t *sconn = (sconn_t *) arg;
     buf_t *buf = sconn->buf_recv;
-    apr_socket_t *sock = sconn->pjob->pfd.desc.s;
-
-    apr_status_t status = APR_SUCCESS;
-    //status = apr_socket_recv(pfd->desc.s, (char *)buf, &n);
-    status = buf_from_sock(buf, sock);
+    // Use transport abstraction for recv
+    int status = sconn->transport->recv(sconn->transport, sconn->comm, buf->raw + buf->idx_write, buf->sz - buf->idx_write);
+    if (status > 0) {
+        buf->idx_write += status;
+    }
 
     // invoke msg handling.
     size_t sz_c = 0;
@@ -243,45 +233,14 @@ void handle_sconn_read(void* arg) {
 
 void handle_sconn_write(void* arg) {
     sconn_t *sconn = (sconn_t*)arg;
-
-    //   LOG_TRACE("write message on socket %x", pfd->desc.s);
-
     apr_thread_mutex_lock(sconn->comm->mx);
-
     buf_t *buf = sconn->buf_send;
-    apr_socket_t *sock = sconn->pjob->pfd.desc.s;
-
-    apr_status_t status = APR_SUCCESS;
-    status = buf_to_sock(buf, sock);
-
-    if (status == APR_SUCCESS || status == APR_EAGAIN) {
-	int mode = (buf_sz_cnt(buf) > 0) ? (APR_POLLIN | APR_POLLOUT) : APR_POLLIN;
-	//	if (buf_sz_cnt(buf) == 0) {
-	    poll_mgr_update_job(sconn->pjob->mgr, sconn->pjob, mode);	    
-	    //}
-
-	if (status == APR_EAGAIN) {
-	    LOG_DEBUG("sconn poll on write, socket busy, resource "
-		      "temporarily unavailable. mode: %s, size in send buf: %d", 
-		      mode == APR_POLLIN ? "only in" : "in and out",
-		      buf_sz_cnt(buf));
-	} else {
-	    LOG_DEBUG("sconn write something out.");
-	}
-    } else if (status == APR_ECONNRESET) {
-        LOG_INFO("connection reset on write, is this a mac os?");
-	poll_mgr_remove_job(sconn->pjob->mgr, sconn->pjob);
-    } else if (status == APR_EAGAIN) {
-	SAFE_ASSERT(0);
-    } else if (status == APR_EPIPE) {
-        LOG_INFO("on write, broken pipe, epipe error. remove poll job.");
-	poll_mgr_remove_job(sconn->pjob->mgr, sconn->pjob);
-    } else {
-        LOG_ERROR("error code: %d, error message: %s",
-		  (int)status, apr_strerror(status, (char*)malloc(100), 100));
-        SAFE_ASSERT(status == APR_SUCCESS);
+    int sent = sconn->transport->send(sconn->transport, sconn->comm, buf->raw + buf->idx_read, buf->idx_write - buf->idx_read);
+    if (sent > 0) {
+        buf->idx_read += sent;
     }
-
+    int mode = (buf_sz_cnt(buf) > 0) ? (APR_POLLIN | APR_POLLOUT) : APR_POLLIN;
+    poll_mgr_update_job(sconn->pjob->mgr, sconn->pjob, mode);
     apr_thread_mutex_unlock(sconn->comm->mx);
 }
 

@@ -3,14 +3,16 @@
 #include <apr_thread_pool.h>
 #include "polling.h"
 #include "buf.h"
+#include "transport.h"
 
 typedef struct {
-rpc_comm_t *comm;
+    rpc_comm_t *comm;
     poll_job_t *pjob;
     mpr_hash_t *ht_conn;
     bool is_start;
     // thread pool for handling slow messages.
     apr_thread_pool_t *tp;
+    struct transport* transport; // transport abstraction
 } server_t;
 
 typedef struct {

@@ -1,0 +1,14 @@
+=========================================
+Configuration:
+=========================================
+  Number of shards:  2
+  Shard index:       0
+  Number of threads: 6
+  Cluster:           learner
+  Micro benchmark:   disabled
+  Replicated mode:   enabled
+=========================================
+20251022-16:35.03-125597(us) 63134 * ParseOldFormat  (configuration.cc:66): Using old configuration format
+terminate called after throwing an instance of 'YAML::BadFile'
+  what():  bad file: config/1leader_2followers/paxos6_shardidx0.yml
+bash/shard.sh: line 41: 63134 Aborted                 (core dumped) ./build/dbtest --num-threads 6 --shard-index 0 --shard-config /home/gkalla/Workspace/mako/src/mako/config/local-shards2-warehouses6.yml -F config/1leader_2followers/paxos6\_shardidx0.yml -F config/occ_paxos.yml -P learner --is-replicated

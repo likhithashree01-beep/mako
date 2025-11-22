@@ -19,10 +19,22 @@ void client_create(client_t **cli, poll_mgr_t *mgr) {
 
     buf_create(&c->buf_recv);
     buf_create(&c->buf_send);
+    // Select transport at runtime
+    #include "transport_selector.h"
+    extern transport_t* create_tcp_transport();
+    extern transport_t* create_rdma_transport();
+    transport_type_t ttype = get_transport_type();
+    if (ttype == TRANSPORT_RDMA) {
+        c->transport = create_rdma_transport();
+    } else {
+        c->transport = create_tcp_transport();
+    }
+    c->comm->transport = c->transport;
     LOG_DEBUG("a new client created.");
 }
 
 void client_destroy(client_t *cli) {
+    if (cli->transport) cli->transport->destroy(cli->transport);
     rpc_common_destroy(cli->comm);
     buf_destroy(cli->buf_recv);
     buf_destroy(cli->buf_send);
@@ -31,48 +43,11 @@ void client_destroy(client_t *cli) {
 }
 
 void client_connect(client_t *cli) {
+    // Use transport abstraction for connect
     LOG_DEBUG("connecting to server %s %d", cli->comm->ip, cli->comm->port);
-    
-    apr_status_t status = APR_SUCCESS;
-    status = apr_sockaddr_info_get(&cli->comm->sa, cli->comm->ip, APR_INET, 
-				   cli->comm->port, 0, cli->comm->mp);
-    SAFE_ASSERT(status == APR_SUCCESS);
-
-    status = apr_socket_create(&cli->comm->s, cli->comm->sa->family, 
-			       SOCK_STREAM, APR_PROTO_TCP, cli->comm->mp);
-    SAFE_ASSERT(status == APR_SUCCESS);
-
-    status = apr_socket_opt_set(cli->comm->s, APR_TCP_NODELAY, 1);
-    SAFE_ASSERT(status == APR_SUCCESS);
-
-    while (1) {
-	// repeatedly retry
-        LOG_TRACE("TCP CLIENT TRYING TO CONNECT.");
-        status = apr_socket_connect(cli->comm->s, cli->comm->sa);
-        if (status == APR_SUCCESS /*|| status == APR_EINPROGRESS */) {
-            break;
-        } else if (status == APR_ECONNREFUSED) {
-	    LOG_DEBUG("client connect refused, maybe the server is not ready yet");
-	} else if (status == APR_EINVAL) {
-	    LOG_ERROR("client connect error, invalid argument. ip: %s, port: %d", 
-		      cli->comm->ip, cli->comm->port);
-	    SAFE_ASSERT(0);
-	} else {
-            LOG_ERROR("client connect error:%s", apr_strerror(status, (char*)malloc(100), 100));
-	    SAFE_ASSERT(0);
-        }
-	apr_sleep(50 * 1000);
-    }
-    LOG_INFO("connected socket on remote addr %s, port %d", cli->comm->ip, cli->comm->port);
-    status = apr_socket_opt_set(cli->comm->s, APR_SO_NONBLOCK, 1);
-    SAFE_ASSERT(status == APR_SUCCESS);
-    
-    // add to epoll
-//    context_t *ctx = c->ctx;
-//    while (ctx->ps == NULL) {
-//        // not inited yet, just wait.
-//    }
-//
+    int rc = cli->transport->connect(cli->transport, cli->comm);
+    SAFE_ASSERT(rc == 0);
+    // Setup poll job as before (assume comm->s is set by transport)
     apr_pollfd_t pfd = {cli->comm->mp, APR_POLL_SOCKET, APR_POLLIN, 0, {NULL}, NULL};
     pfd.desc.s = cli->comm->s;
     pfd.client_data = cli->pjob;
@@ -85,15 +60,18 @@ void client_connect(client_t *cli) {
 }
 
 void client_disconnect(client_t *cli) {
-
+    // Use transport abstraction for disconnect
+    if (cli->transport) cli->transport->disconnect(cli->transport, cli->comm);
 }
 
 void handle_client_read(void *arg) {
     client_t *cli = (client_t*) arg;
     buf_t *buf = cli->buf_recv;
-    apr_socket_t *sock = cli->pjob->pfd.desc.s;
-
-    apr_status_t status = buf_from_sock(buf, sock);
+    // Use transport abstraction for recv
+    int status = cli->transport->recv(cli->transport, cli->comm, buf->raw + buf->idx_write, buf->sz - buf->idx_write);
+    if (status > 0) {
+        buf->idx_write += status;
+    }
 
     // invoke msg handling.
     size_t sz_c = 0;
@@ -158,46 +136,16 @@ void handle_client_read(void *arg) {
 void handle_client_write(void *arg) {
     client_t *cli = (client_t*) arg;
     buf_t *buf = cli->buf_send;
-    apr_socket_t *sock = cli->pjob->pfd.desc.s;
-
     LOG_TRACE("handle client write");
-
     apr_thread_mutex_lock(cli->comm->mx);
-    apr_status_t status = buf_to_sock(buf, sock);
-
-    SAFE_ASSERT(status == APR_SUCCESS || status == APR_EAGAIN);
-
-    if (status == APR_SUCCESS || status == APR_EAGAIN) {
-	int mode = (buf_sz_cnt(buf) > 0) ? (APR_POLLIN | APR_POLLOUT) : APR_POLLIN;
-	if (buf_sz_cnt(buf) == 0) {
-	    poll_mgr_update_job(cli->pjob->mgr, cli->pjob, mode);
-	}
-
-	if (status == APR_EAGAIN) {
-	    LOG_DEBUG("cli poll on write, socket busy, resource "
-		      "temporarily unavailable. mode: %s, size in send buf: %d", 
-		      mode == APR_POLLIN ? "only in" : "in and out",
-		      buf_sz_cnt(buf));
-	} else {
-	    LOG_DEBUG("cli write something out.");
-	}
-    } else if (status == APR_ECONNRESET) {
-        LOG_ERROR("connection reset on write, is this a mac os?");
-	poll_mgr_remove_job(cli->pjob->mgr, cli->pjob);
-        return;
-    } else if (status == APR_EAGAIN) {
-	SAFE_ASSERT(0);
-    } else if (status == APR_EPIPE) {
-        LOG_ERROR("on write, broken pipe, epipe error, is this a mac os?");
-	poll_mgr_remove_job(cli->pjob->mgr, cli->pjob);
-        return;
-    } else {
-        LOG_ERROR("error code: %d, error message: %s",
-		  (int)status, apr_strerror(status, (char*)malloc(100), 100));
-        SAFE_ASSERT(status == APR_SUCCESS);
+    int sent = cli->transport->send(cli->transport, cli->comm, buf->raw + buf->idx_read, buf->idx_write - buf->idx_read);
+    if (sent > 0) {
+        buf->idx_read += sent;
     }
-
-    //    poll_mgr_update_job(cli->pjob->mgr, cli->pjob, mode);
+    int mode = (buf_sz_cnt(buf) > 0) ? (APR_POLLIN | APR_POLLOUT) : APR_POLLIN;
+    if (buf_sz_cnt(buf) == 0) {
+        poll_mgr_update_job(cli->pjob->mgr, cli->pjob, mode);
+    }
     apr_thread_mutex_unlock(cli->comm->mx);
 }
 

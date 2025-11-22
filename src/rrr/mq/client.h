@@ -1,15 +1,17 @@
 
 #include "polling.h"
 #include "rpc_comm.h"
+#include "transport.h"
 
 #ifndef CLIENT_H
 #define CLIENT_H
 
 typedef struct {
-    rpc_comm_t *comm;
-    poll_job_t *pjob;
-    buf_t *buf_recv;
-    buf_t *buf_send;
+	rpc_comm_t *comm;
+	poll_job_t *pjob;
+	buf_t *buf_recv;
+	buf_t *buf_send;
+	struct transport* transport; // transport abstraction
 } client_t;
 
 void client_create(client_t **cli, 

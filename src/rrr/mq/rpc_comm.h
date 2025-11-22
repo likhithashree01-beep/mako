@@ -38,7 +38,10 @@ typedef struct {
 
     // ---needed in server_t & client_t
     apr_sockaddr_t *sa; // socket_addr
-    apr_socket_t *s;    // socket
+    apr_socket_t *s;    // socket (used by TCP transport)
+
+    // ---transport abstraction
+    struct transport* transport; // pointer to transport interface
 } rpc_comm_t;
 
 static void rpc_common_create(rpc_comm_t **comm) {
