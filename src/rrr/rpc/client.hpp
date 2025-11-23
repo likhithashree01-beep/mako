@@ -148,6 +148,7 @@ class Client: public Pollable, public std::enable_shared_from_this<Client> {
     rusty::Arc<PollThreadWorker> poll_thread_worker_;
 
     int sock_;
+    std::shared_ptr<Transport> rdma_transport_;  // Only used for RDMA connections
     enum {
         NEW, CONNECTED, CLOSED
     } status_;
@@ -221,6 +222,10 @@ public:
     void close();
 
     int fd() {
+        // For RDMA, return completion queue fd; for TCP, return socket fd
+        if (rdma_transport_) {
+            return rdma_transport_->fd();
+        }
         return sock_;
     }
 

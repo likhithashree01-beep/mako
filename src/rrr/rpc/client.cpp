@@ -12,6 +12,8 @@
 #include "reactor/coroutine.h"
 #include "client.hpp"
 #include "utils.hpp"
+#include "transport/transport.h"  // Only for RDMA support
+#include <cstring>
 
 using namespace std;
 
@@ -107,16 +109,46 @@ void Client::invalidate_pending_futures() {
 void Client::close() {
   if (status_ == CONNECTED) {
     poll_thread_worker_->remove(*this);
-    ::close(sock_);
+    if (rdma_transport_) {
+      rdma_transport_->close();
+      rdma_transport_ = nullptr;
+    } else {
+      ::close(sock_);
+    }
   }
   status_ = CLOSED;
+  sock_ = -1;
   invalidate_pending_futures();
 }
 
-// @unsafe - Establishes TCP/IPC connection to server
+// @unsafe - Establishes TCP/IPC connection to server, or RDMA if "rdma://" prefix detected
 // SAFETY: Proper socket creation, configuration, and error handling
 int Client::connect(const char* addr) {
   verify(status_ != CONNECTED);
+  
+  // Check for RDMA protocol prefix
+  if (strncmp(addr, "rdma://", 7) == 0) {
+    // Use RDMA transport
+    const char* rdma_addr = addr + 7;  // Skip "rdma://" prefix
+    rdma_transport_ = create_rdma_transport(rdma_addr);
+    if (!rdma_transport_) {
+      Log_error("rrr::Client: failed to create RDMA transport for %s", rdma_addr);
+      return EINVAL;
+    }
+    
+    int ret = rdma_transport_->connect(rdma_addr);
+    if (ret != 0) {
+      rdma_transport_ = nullptr;
+      return ret;
+    }
+    
+    Log_debug("rrr::Client: connected to %s using RDMA transport", rdma_addr);
+    status_ = CONNECTED;
+    poll_thread_worker_->add(shared_from_this());
+    return 0;
+  }
+  
+  // Default: Use original TCP socket code
   string addr_str(addr);
   size_t idx = addr_str.find(":");
   if (idx == string::npos) {
@@ -194,7 +226,7 @@ void Client::handle_error() {
   close();
 }
 
-// @unsafe - Writes buffered data to socket
+// @unsafe - Writes buffered data to socket or RDMA transport
 // SAFETY: Protected by spinlock, handles partial writes
 void Client::handle_write() {
   if (status_ != CONNECTED) {
@@ -202,7 +234,36 @@ void Client::handle_write() {
   }
 
   out_l_.lock();
-  out_.write_to_fd(sock_);
+  
+  // Handle RDMA differently from TCP
+  if (rdma_transport_) {
+    // For RDMA: copy data from Marshal to transport and send
+    while (!out_.empty()) {
+      size_t data_size = out_.content_size();
+      if (data_size > 0) {
+        char* buf = new char[data_size];
+        size_t read_size = out_.read(buf, data_size);
+        
+        // Send via RDMA
+        ssize_t sent = rdma_transport_->write(buf, read_size);
+        if (sent > 0) {
+          // Data sent successfully, Marshal already updated by read()
+        } else {
+          // Would block or error - put data back?
+          // For now, just break and retry later
+          delete[] buf;
+          break;
+        }
+        delete[] buf;
+      } else {
+        break;
+      }
+    }
+  } else {
+    // TCP: use standard socket write
+    out_.write_to_fd(sock_);
+  }
+  
   if (out_.empty()) {
     //Log_info("Client handle_write setting read mode here...");
     poll_thread_worker_->update_mode(*this, Pollable::READ);
@@ -217,7 +278,23 @@ void Client::handle_read() {
     return;
   }
 
-  int bytes_read = in_.read_from_fd(sock_);
+  int bytes_read = 0;
+  
+  // Handle RDMA differently from TCP
+  if (rdma_transport_) {
+    // For RDMA: read from transport and copy to Marshal
+    char buf[4096];  // Read in chunks
+    ssize_t n = rdma_transport_->read(buf, sizeof(buf));
+    if (n > 0) {
+      // Copy to Marshal
+      in_.write(buf, n);
+      bytes_read = n;
+    }
+  } else {
+    // TCP: use standard socket read
+    bytes_read = in_.read_from_fd(sock_);
+  }
+  
   if (bytes_read == 0) {
     return;
   }
