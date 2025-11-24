@@ -113,9 +113,9 @@ int main(int argc, char **argv) {
                 long long st = stoll(string(log, 16, 16));
                 long long et = getCurrentTimeMillis();
                 timestamp = static_cast<uint32_t>(et);  // Use current time as timestamp
-                // cout << "register_for_leader_par_id_return, par_id: " << par_id << ", epoch:" << get_epoch()
-                //      << ", slot_id:" << slot_id << ", no-ops:" << (len < 10 && len > 0) << ", len: " << len
-                //      << ", time spent to commit log: " << (et - st) << "ms, log-id: " << log_id << endl;
+                cout << "register_for_leader_par_id_return, par_id: " << par_id << ", epoch:" << get_epoch()
+                     << ", slot_id:" << slot_id << ", no-ops:" << (len < 10 && len > 0) << ", len: " << len
+                     << ", time spent to commit log: " << (et - st) << "ms, log-id: " << log_id << endl;
             } else {
                 timestamp = static_cast<uint32_t>(getCurrentTimeMillis());
                 // cout << "register_for_leader_par_id_return, par_id: " << par_id << ", epoch:" << get_epoch()
@@ -200,15 +200,15 @@ int main(int argc, char **argv) {
         VERIFY(fCnt-num_workers==message_count*num_workers, "committed logs count verify");
     }
     
-    // if (leader_config) {
-    //     cout << "sent logs count:" << endl;
-    //     int tput = 0;
-    //     for (const auto& [par_id, count] : counters) {
-    //         cout << " - par_id[" << par_id << "] " << count << endl;
-    //         tput += count;
-    //     }
-    //     cout << " - total: " << tput << endl;
-    // }
+    if (leader_config) {
+        cout << "sent logs count:" << endl;
+        int tput = 0;
+        for (const auto& [par_id, count] : counters) {
+            cout << " - par_id[" << par_id << "] " << count << endl;
+            tput += count;
+        }
+        cout << " - total: " << tput << endl;
+    }
 
     this_thread::sleep_for(chrono::seconds(3));
     return 0;

@@ -335,14 +335,14 @@ void BulkCoordinatorMultiPaxos::Accept() {
       // }
     });
     
-  // auto strt = std::chrono::high_resolution_clock::now();
-  WAN_WAIT;
-  // auto endt2 = std::chrono::high_resolution_clock::now();
-  sp_quorum->Wait();
-  // auto endt3 = std::chrono::high_resolution_clock::now();
-  // Log_info("Wan_wait: %d, %d", 
-  //         std::chrono::duration_cast<std::chrono::milliseconds>(endt2 - strt).count(),
-  //         std::chrono::duration_cast<std::chrono::milliseconds>(endt3 - endt2).count());
+    auto strt = std::chrono::high_resolution_clock::now();
+    WAN_WAIT;
+    auto endt2 = std::chrono::high_resolution_clock::now();
+    sp_quorum->Wait();
+    auto endt3 = std::chrono::high_resolution_clock::now();
+    Log_info("Wan_wait: %d, %d", 
+             std::chrono::duration_cast<std::chrono::microseconds>(endt2 - strt).count(),
+             std::chrono::duration_cast<std::chrono::microseconds>(endt3 - endt2).count());
 
     sp_quorum->Wait();
     if (sp_quorum->Yes()) {
