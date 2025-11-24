@@ -389,7 +389,7 @@ namespace mako
     class ErrorCode
     {
     public:
-        static const int SUCCESS = 0;
+        static const int M_SUCCESS = 0;
         static const int TIMEOUT = 1;
         static const int ERROR = 2;
         static const int ABORT = 3;

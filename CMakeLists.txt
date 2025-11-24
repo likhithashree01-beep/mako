@@ -583,6 +583,11 @@ file(GLOB MEMDB_SRC
     "src/memdb/*.cc"
 )
 
+# Collect Mako Lib source files
+file(GLOB MAKO_LIB_SRC
+    "src/mako/lib/*.cc"
+)
+
 # Collect deptran and bench source files (matching WAF's ant_glob patterns)
 file(GLOB_RECURSE DEPTRAN_SRC
     "src/deptran/*.cc"
@@ -600,6 +605,7 @@ add_library(txlog SHARED
     ${DEPTRAN_SRC}
     ${RRR_SRC}
     ${MEMDB_SRC}
+    ${MAKO_LIB_SRC}
 )
 
 # Add dependency to ensure rcc_rpc.h is generated before txlog is built
@@ -607,10 +613,15 @@ add_dependencies(txlog rcc_rpc_gen)
 
 target_include_directories(txlog PRIVATE
     src
+    ${W}
     src/rrr
     src/memdb
     src/deptran
     src/bench
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/mako
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/mako/masstree
+    ${CMAKE_CURRENT_SOURCE_DIR}/third-party/erpc/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third-party/erpc/third_party/asio/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third-party/rusty-cpp/include
     dependencies/yaml-cpp/include
     ${Boost_INCLUDE_DIRS}
@@ -627,6 +638,10 @@ target_link_libraries(txlog
     Boost::thread
     Boost::coroutine
     Boost::context
+    erpc
+    numa
+    ${LIBEVENT_LDFLAGS}
+    ${GFLAGS_LDFLAGS}
     pthread
     ${CMAKE_DL_LIBS}
     Python3::Python

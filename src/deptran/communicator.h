@@ -7,6 +7,7 @@
 #include "command_marshaler.h"
 #include "deptran/rcc/dep_graph.h"
 #include "rcc_rpc.h"
+#include "transport/transport_interface.h"
 #include <ctime>
 #include <rusty/arc.hpp>
 
@@ -103,8 +104,14 @@ class Communicator {
   std::atomic_bool client_leaders_connected_;
   std::vector<std::thread> threads;
 
+  std::unique_ptr<TransportInterface> transport_;
+
   Communicator(rusty::Option<rusty::Arc<PollThreadWorker>> poll_mgr = rusty::None);
   virtual ~Communicator();
+
+  void SetTransport(std::unique_ptr<TransportInterface> t) {
+    transport_ = std::move(t);
+  }
 
   SiteProxyPair RandomProxyForPartition(parid_t partition_id) const;
   SiteProxyPair LeaderProxyForPartition(parid_t) const;

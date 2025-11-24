@@ -5,6 +5,8 @@
 #include "../constants.h"
 #include "../communicator.h"
 
+class FastTransport;
+
 namespace janus {
 
 // Paxos status codes used for encoding with timestamps
@@ -23,6 +25,8 @@ class TxData;
 
 class MultiPaxosCommo : public Communicator {
  public:
+  ::FastTransport* ft_ = nullptr;
+  
   MultiPaxosCommo() = delete;
   MultiPaxosCommo(rusty::Option<rusty::Arc<PollThreadWorker>> poll = rusty::None);
 

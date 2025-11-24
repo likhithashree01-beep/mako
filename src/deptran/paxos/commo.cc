@@ -1,16 +1,59 @@
 
 #include "commo.h"
+#include "../transport/transport_factory.h"
+#include "../../mako/lib/fasttransport.h"
 #include "../rcc/graph.h"
 #include "../rcc/graph_marshaler.h"
 #include "../command.h"
 #include "../procedure.h"
 #include "../command_marshaler.h"
 #include "../rcc_rpc.h"
+#include <cstdlib>
 
 namespace janus {
 
 MultiPaxosCommo::MultiPaxosCommo(rusty::Option<rusty::Arc<PollThreadWorker>> poll)
   : Communicator(poll) {
+    auto config = Config::GetConfig();
+    
+    const char* transport_env = std::getenv("MAKO_TRANSPORT");
+    std::string transport_type = (transport_env) ? std::string(transport_env) : "tcp";
+
+    if (transport_type == "rdma") {
+        Log_info("Initializing RDMA transport...");
+        std::string config_file = config->config_paths_.empty() ? "config.yml" : config->config_paths_[0];
+        
+        // Get site info
+        // Note: get_site_id() returns the ID of the current site as configured
+        uint32_t site_id = config->get_site_id();
+        const auto& site = config->SiteById(site_id);
+        
+        std::string ip = site.host; 
+        // Handle localhost -> 127.0.0.1 conversion if necessary, or rely on FastTransport/eRPC to handle it
+        if (ip == "localhost") ip = "127.0.0.1";
+        
+        std::string cluster = "mako";
+        uint8_t st_nr_req_types = 0;
+        uint8_t end_nr_req_types = 20; // Allow range of request types
+        uint8_t phy_port = 0;
+        uint8_t numa_node = 0;
+        int shard_idx = site.partition_id_;
+        uint16_t s_id = (uint16_t)site_id;
+
+        // FastTransport constructor takes non-const string ref for ip
+        ft_ = new FastTransport(config_file, ip, cluster, st_nr_req_types, end_nr_req_types, 
+                                phy_port, numa_node, shard_idx, s_id);
+                                
+        if (!ft_) {
+             Log_fatal("Failed to create FastTransport for RDMA");
+        }
+        
+        transport_ = TransportFactory::CreateTransport("rdma", &rpc_proxies_, ft_);
+        Log_info("RDMA transport initialized for site %d (par %d) at %s", s_id, shard_idx, ip.c_str());
+    } else {
+        Log_info("Initializing TCP transport...");
+        transport_ = TransportFactory::CreateTransport("tcp", &rpc_proxies_);
+    }
 }
 
 void MultiPaxosCommo::BroadcastPrepare(parid_t par_id,
@@ -270,26 +313,22 @@ MultiPaxosCommo::BroadcastHeartBeat(parid_t par_id,
   vector<Future*> fus;
   int cur_batch_idx = current_proxy_batch_idx;
   current_proxy_batch_idx=(current_proxy_batch_idx+1)%proxy_batch_size;
+  
+  TransportMessage msg;
+  msg.type = MSG_HEARTBEAT;
+  msg.payload = cmd;
+
   for (int i=0;i<n+1;i++) {
     auto p = proxies.at(cur_batch_idx*(Config::GetConfig()->GetPartitionSize(par_id)) + i);
     if (Config::GetConfig()->SiteById(p.first).role==2) continue; 
-    auto proxy = (MultiPaxosProxy*) p.second;
-    FutureAttr fuattr;
-    fuattr.callback = [e, cb] (rusty::Arc<Future> fu) {
-      if (fu->get_error_code()!=0) {
-        Log_info("received an error message5");
-        return;
-      }
+    
+    transport_->SendMessage(p.first, msg, [e, cb](Marshal& reply) {
       i32 valid;
       i32 ballot;
-      fu->get_reply() >> ballot >> valid;
+      reply >> ballot >> valid;
       cb(ballot, valid);
       e->FeedResponse(valid);
-    };
-    verify(cmd != nullptr);
-    MarshallDeputy md(cmd);
-    auto fu_result = proxy->async_Heartbeat(md, fuattr);
-    // Arc auto-released
+    });
   }
   return e;
 }
@@ -308,29 +347,25 @@ MultiPaxosCommo::BroadcastSyncLog(parid_t par_id,
   vector<Future*> fus;
   int cur_batch_idx = current_proxy_batch_idx;
   current_proxy_batch_idx=(current_proxy_batch_idx+1)%proxy_batch_size;
+  
+  TransportMessage msg;
+  msg.type = MSG_SYNC_LOG;
+  msg.payload = cmd;
+
   for (int i=0;i<n+1;i++) {
     auto p = proxies.at(cur_batch_idx*(Config::GetConfig()->GetPartitionSize(par_id)) + i);
     if (Config::GetConfig()->SiteById(p.first).role==2) continue; 
     if (Config::GetConfig()->SiteById(p.first).role==0) continue;
-    auto proxy = (MultiPaxosProxy*) p.second;
-    FutureAttr fuattr;
-    fuattr.callback = [e, cb] (rusty::Arc<Future> fu) {
-      if (fu->get_error_code()!=0) {
-        Log_info("received an error message3");
-        return;
-      }
+    
+    transport_->SendMessage(p.first, msg, [e, cb](Marshal& reply) {
       i32 valid;
       i32 ballot;
       MarshallDeputy response_val;
-      fu->get_reply() >> ballot >> valid >> response_val;
+      reply >> ballot >> valid >> response_val;
       auto sp_md = make_shared<MarshallDeputy>(response_val);
       cb(sp_md, ballot, valid);
       e->FeedResponse(valid);
-    };
-    verify(cmd != nullptr);
-    MarshallDeputy md(cmd);
-    auto fu_result = proxy->async_SyncLog(md, fuattr);
-    // Arc auto-released
+    });
   }
   return e;
 }
@@ -347,27 +382,23 @@ MultiPaxosCommo::BroadcastSyncNoOps(parid_t par_id,
   vector<Future*> fus;
   int cur_batch_idx = current_proxy_batch_idx;
   current_proxy_batch_idx=(current_proxy_batch_idx+1)%proxy_batch_size;
+  
+  TransportMessage msg;
+  msg.type = MSG_SYNC_NOOP;
+  msg.payload = cmd;
+
   for (int i=0;i<n+1;i++) {
     auto p = proxies.at(cur_batch_idx*(Config::GetConfig()->GetPartitionSize(par_id)) + i);
     if (Config::GetConfig()->SiteById(p.first).role==2) continue;
     if (Config::GetConfig()->SiteById(p.first).role==0) continue; // ??? why skip itself
-    auto proxy = (MultiPaxosProxy*) p.second;
-    FutureAttr fuattr;
-    fuattr.callback = [e, cb] (rusty::Arc<Future> fu) {
-      if (fu->get_error_code()!=0) {
-        Log_info("received an error message4");
-        return;
-      }
+    
+    transport_->SendMessage(p.first, msg, [e, cb](Marshal& reply) {
       i32 valid;
       i32 ballot;
-      fu->get_reply() >> ballot >> valid;
+      reply >> ballot >> valid;
       cb(ballot, valid);
       e->FeedResponse(valid);
-    };
-    verify(cmd != nullptr);
-    MarshallDeputy md(cmd);
-    auto fu_result = proxy->async_SyncNoOps(md, fuattr);
-    // Arc auto-released
+    });
   }
   return e;
 }
@@ -418,30 +449,30 @@ MultiPaxosCommo::BroadcastBulkAccept(parid_t par_id,
   int cur_batch_idx = current_proxy_batch_idx;
   current_proxy_batch_idx=(current_proxy_batch_idx+1)%proxy_batch_size;
   //Log_info("cur_batch_idx:%d",cur_batch_idx);
+  
+  TransportMessage msg;
+  msg.type = MSG_BULK_ACCEPT;
+  msg.payload = cmd;
+
+  if (!transport_) {
+      Log_fatal("MultiPaxosCommo: transport_ is null in BroadcastBulkAccept");
+  }
+
   for (int i=0;i<n+1;i++) {
     auto p = proxies.at(cur_batch_idx*(Config::GetConfig()->GetPartitionSize(par_id)) + i);
     if (Config::GetConfig()->SiteById(p.first).role==2) continue;
-    auto proxy = (MultiPaxosProxy*) p.second;  // a Proxy pool for the concurrent request
-    FutureAttr fuattr;
+    
     int st = p.first;
-    fuattr.callback = [e, cb, st] (rusty::Arc<Future> fu) {
-      if (fu->get_error_code()!=0) {
-        Log_info("received an error message2");
-        return;
-      }
+    // Log_debug("Calling SendMessage to %d", st);
+    transport_->SendMessage(st, msg, [e, cb, st](Marshal& reply) {
       i32 valid;
       i32 ballot;
-      fu->get_reply() >> ballot >> valid;
-       // it's possible during failure because the client can receive reponse even the distant server shutdowns
+      reply >> ballot >> valid;
       if (!valid)
         Log_debug("Accept invalid response received from %d site", st);
       cb(ballot, valid);
       e->FeedResponse(valid);
-    };
-    verify(cmd != nullptr);
-    MarshallDeputy md(cmd);
-    auto fu_result = proxy->async_BulkAccept(md, fuattr);
-    // Arc auto-released
+    });
   }
   return e;
 }
@@ -458,25 +489,22 @@ MultiPaxosCommo::BroadcastBulkDecide(parid_t par_id,
   vector<Future*> fus;
   int cur_batch_idx = current_proxy_batch_idx;
   current_proxy_batch_idx=(current_proxy_batch_idx+1)%proxy_batch_size;
+
+  TransportMessage msg;
+  msg.type = MSG_BULK_DECIDE;
+  msg.payload = cmd;
+
   for (int i=0;i<n+1;i++) {
     auto p = proxies.at(cur_batch_idx*(Config::GetConfig()->GetPartitionSize(par_id)) + i);
     if (Config::GetConfig()->SiteById(p.first).role==2) continue;
-    auto proxy = (MultiPaxosProxy*) p.second;
-    FutureAttr fuattr;
-    fuattr.callback = [e, cb] (rusty::Arc<Future> fu) {
-      if (fu->get_error_code()!=0) {
-        Log_info("received an error message");
-        return;
-      }
+    
+    transport_->SendMessage(p.first, msg, [e, cb](Marshal& reply) {
       i32 valid;
       i32 ballot;
-      fu->get_reply() >> ballot >> valid;
+      reply >> ballot >> valid;
       cb(ballot, valid);
       e->FeedResponse(valid);
-    };
-    MarshallDeputy md(cmd);
-    auto fu_result = proxy->async_BulkDecide(md, fuattr);
-    // Arc auto-released
+    });
   }
   return e;
 }
